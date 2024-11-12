@@ -149,9 +149,10 @@ void CentralizedServer::handle_client(int client_socket)
 
     while ((bytes_read = read(client_socket, buffer, 1024)) > 0)
     {
+        
         std::string request(buffer, bytes_read);
         json request_json;
-
+        std::cout << request << std::endl;
         try
         {
             // Parse JSON request
@@ -263,6 +264,7 @@ void CentralizedServer::register_chunk(const std::string &file_hash, const std::
     file_info.total_chunks = std::max(file_info.total_chunks, chunk_id + 1);
 
     std::cout << "Registered chunk " << chunk_id << " for file " << file_hash << " from peer " << peer_id << std::endl;
+    printFileTable();
 }
 
 std::vector<int> CentralizedServer::get_chunk_locations(const std::string &file_hash, int chunk_id)

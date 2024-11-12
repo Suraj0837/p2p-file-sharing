@@ -76,7 +76,7 @@ void PeerClient::register_file(const std::string &filepath)
     std::string file_hash = generateHashFromFile(filepath);
     int total_chunks = get_chunk_count(file_hash);
 
-    const int max_chunks_per_message = 4096;
+    const int max_chunks_per_message = 100;
     int chunk_start = 0;
 
     while (chunk_start < total_chunks)

@@ -9,7 +9,8 @@
 #include <filesystem>
 #include <format>
 
-#define CHUNK_SIZE 1048576 // 1 MB
+// #define CHUNK_SIZE 1048576 // 1 MB
+#define CHUNK_SIZE 65536 // 1 KB
 #define UPLOAD_FROM_PATH "./upload"
 #define CHUNK_FILE_PATH "./chunkked"
 #define HASHING_CHUNK_SIZE 4096
