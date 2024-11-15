@@ -17,4 +17,5 @@ string generateHashFromFile(string filePath);
 void createChunksFromFile(string filepath);
 void createFileFromChunks(string hash);
 int get_chunk_count(const std::string &file_hash);
-int send_chunk(int, string);
+int send_chunk(int connection_fd, int chunk_id, string file_hash);
+std::vector<std::pair<std::string, int>> parsePeerList(const std::string& peerListResponse);

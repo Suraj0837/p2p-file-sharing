@@ -8,9 +8,12 @@
 #include <sys/stat.h>
 #include <filesystem>
 #include <format>
+#include <unistd.h>
+#include "utilities.h"
+#include <cstring>
+#include <cerrno>
 
-// #define CHUNK_SIZE 1048576 // 1 MB
-#define CHUNK_SIZE 65536 // 1 KB
+
 #define UPLOAD_FROM_PATH "./upload"
 #define CHUNK_FILE_PATH "./chunkked"
 #define HASHING_CHUNK_SIZE 4096
@@ -19,6 +22,63 @@ using namespace std;
 
 #include <filesystem>
 #include <iostream>
+
+// Parses the peer list and returns a vector of <IP, Port> pairs
+std::vector<std::pair<std::string, int>> parsePeerList(const std::string& peerListResponse) {
+    std::vector<std::pair<std::string, int>> peerAddresses;
+    
+    // Parse the JSON response
+    json response = json::parse(peerListResponse);
+    
+    // Check if the response has "chunks" key and iterate over it
+    if (response.contains("chunks")) {
+        for (const auto& chunk : response["chunks"]) {
+            // Iterate over peers for each chunk
+            for (const auto& peer : chunk["peers"]) {
+                std::string ip = peer["ip"];
+                int port = peer["port"];
+                peerAddresses.emplace_back(ip, port);
+            }
+        }
+    }
+
+    return peerAddresses;
+}
+
+int send_chunk(int connection_fd, int chunk_id, string file_hash){
+    char buffer[CHUNK_SIZE];
+    int bytesRead;
+    string chunk_path = "./chunkked/" + file_hash + "/" + to_string(chunk_id) + ".bin";
+    
+    if(!std::filesystem::exists(chunk_path))
+        return -1;
+
+    ifstream inputFile(chunk_path, ios::binary);
+    if (!inputFile.is_open()){
+        cout << "Unable to open file" << endl;
+        return -1;
+    }
+
+    inputFile.seekg(0, ios::beg);
+    cout << "Connection FD : "<< connection_fd << endl;
+    cout << "chunkId " << chunk_id << ", file_hash: " << file_hash << endl;
+    
+    while (inputFile.good())
+    {
+        inputFile.read(buffer, CHUNK_SIZE);
+        bytesRead = inputFile.gcount();
+        getchar();
+        // cout << buffer << endl;
+        if(write(connection_fd, buffer, CHUNK_SIZE) == -1){
+            cout<<"Error while sending chunk "<<chunk_id<< endl;
+            std::cerr << "Error writing to file: " << strerror(errno) << std::endl;
+            return -1;
+        }
+        inputFile.close();
+    }
+    cout << buffer << endl;
+    return 0;
+}
 
 int get_chunk_count(const std::string &file_hash)
 {
