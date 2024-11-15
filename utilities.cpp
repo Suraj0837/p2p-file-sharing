@@ -50,8 +50,11 @@ int send_chunk(int connection_fd, int chunk_id, string file_hash){
     int bytesRead;
     string chunk_path = "./chunkked/" + file_hash + "/" + to_string(chunk_id) + ".bin";
     
-    if(!std::filesystem::exists(chunk_path))
+    if(!std::filesystem::exists(chunk_path)){
+        cout << "Asked chunk path not found."<<endl; 
         return -1;
+    }
+        
 
     ifstream inputFile(chunk_path, ios::binary);
     if (!inputFile.is_open()){
@@ -60,14 +63,15 @@ int send_chunk(int connection_fd, int chunk_id, string file_hash){
     }
 
     inputFile.seekg(0, ios::beg);
-    cout << "Connection FD : "<< connection_fd << endl;
-    cout << "chunkId " << chunk_id << ", file_hash: " << file_hash << endl;
+    // cout << "Connection FD : "<< connection_fd << endl;
+    // cout << "chunkId " << chunk_id << ", file_hash: " << file_hash << endl;
     
     while (inputFile.good())
-    {
+    {   
+        // cout << "Within while" << endl;
         inputFile.read(buffer, CHUNK_SIZE);
         bytesRead = inputFile.gcount();
-        getchar();
+        // getchar();
         // cout << buffer << endl;
         if(write(connection_fd, buffer, CHUNK_SIZE) == -1){
             cout<<"Error while sending chunk "<<chunk_id<< endl;
@@ -76,7 +80,7 @@ int send_chunk(int connection_fd, int chunk_id, string file_hash){
         }
         inputFile.close();
     }
-    cout << buffer << endl;
+    // cout << buffer << endl;
     return 0;
 }
 
@@ -206,6 +210,48 @@ void createChunksFromFile(string filepath)
     inputFile.close();
 }
 
+// void createFileFromChunks(string hash)
+// {
+//     int chunk_idx = 0;
+//     char buffer[CHUNK_SIZE];
+//     ofstream outputFile("./hello", ios::binary);
+//     if (!outputFile.is_open())
+//     {
+//         cout << "Unable to open output file for writing." << endl;
+//         return;
+//     }
+//     string chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
+
+//     while (filesystem::exists(chunk_file_path))
+//     {
+//         ifstream chunkFile(chunk_file_path, ios::binary);
+//         if (!chunkFile.is_open())
+//         {
+//             cout << "Unable to open chunk file" << endl;
+//             return;
+//         }
+
+//         chunkFile.read(buffer, CHUNK_SIZE);
+
+//         outputFile.write(buffer, chunkFile.gcount());
+//         if (!outputFile.good())
+//         {
+//             cout << "Error writing to output file." << endl;
+//             chunkFile.close();
+//             outputFile.close();
+//             return;
+//         }
+
+//         chunkFile.close();
+//         chunk_idx++;
+//         chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
+//     }
+
+//     outputFile.close();
+//     cout << "File reconstruction complete." << endl;
+// }
+
+
 void createFileFromChunks(string hash)
 {
     int chunk_idx = 0;
@@ -216,7 +262,7 @@ void createFileFromChunks(string hash)
         cout << "Unable to open output file for writing." << endl;
         return;
     }
-    string chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
+    string chunk_file_path = "./download/" + hash + "/" + to_string(chunk_idx) + ".bin";
 
     while (filesystem::exists(chunk_file_path))
     {
@@ -240,13 +286,12 @@ void createFileFromChunks(string hash)
 
         chunkFile.close();
         chunk_idx++;
-        chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
+        chunk_file_path = "./download/" + hash + "/" + to_string(chunk_idx) + ".bin";
     }
 
     outputFile.close();
     cout << "File reconstruction complete." << endl;
 }
-
 // int main()
 // {
 //     createChunksFromFile("upload/My_Oh_My.mp3");

@@ -225,7 +225,8 @@ void PeerClient::handle_download_requests()
     struct sockaddr_in listener_addr;
     listener_addr.sin_family = AF_INET;
     listener_addr.sin_addr.s_addr = INADDR_ANY;
-    listener_addr.sin_port = htons(0); // Let OS pick a port
+    // listener_addr.sin_port = htons(0); // Let OS pick a port
+    listener_addr.sin_port = htons(this->server_port);
 
     if (bind(listener_sock, (struct sockaddr *)&listener_addr, sizeof(listener_addr)) < 0)
     {
@@ -242,14 +243,18 @@ void PeerClient::handle_download_requests()
         {
             char buffer[1024] = {0};
             read(client_socket, buffer, 1024);
+            cout<<"Receieved message "<< buffer<< endl;
+
             json request = json::parse(buffer);
 
             int chunk_id = request["chunk_id"];
             std::string file_hash = request["file_hash"];
 
+            // cout<<"Extracted Chunk id: " << chunk_id << "Extracted File hash: "<< file_hash << endl;
             // Simulate sending chunk data
+            // cout <<"Invoking send chunk"<<endl;
             send_chunk(client_socket, chunk_id, file_hash);
-
+            cout << "Data sent successfully...Closing connection"<< endl;
             close(client_socket);
         }
     }
@@ -299,9 +304,91 @@ void PeerClient::download_file(const std::string &file_hash)
     auto peerAddresses = parsePeerList(response);
     json response_parsed = json::parse(response);
 
+    // hardcoding temporarily
+    auto &[peerIP, peerPort] = peerAddresses[0];
     // Connect to each peer and request specific chunks of the file
-    for (const auto &[peerIP, peerPort] : peerAddresses)
-    {
+    // for (const auto &[peerIP, peerPort] : peerAddresses)
+    // {   
+    //     cout <<"Details are : PeerIP: "<< peerIP<<" PeerPort: "<<peerPort << endl;
+
+    //     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    //     if (sockfd < 0)
+    //     {
+    //         std::cerr << "Error creating socket\n";
+    //         continue;
+    //     }
+
+    //     struct sockaddr_in peerAddr;
+    //     peerAddr.sin_family = AF_INET;
+    //     peerAddr.sin_port = htons(peerPort);
+    //     if (inet_pton(AF_INET, peerIP.c_str(), &peerAddr.sin_addr) <= 0)
+    //     {
+    //         std::cerr << "Invalid peer IP address\n";
+    //         perror("Error details");
+    //         close(sockfd);
+    //         continue;
+    //     }
+
+    //     if (connect(sockfd, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) < 0)
+    //     {
+    //         std::cerr << "Failed to connect to peer: " << peerIP << ":" << peerPort << "\n";
+    //         perror("Error details");
+    //         close(sockfd);
+    //         continue;
+    //     }
+
+    //     // Request specific chunks (for example, chunk 1, 2, etc.)
+    //     for (int chunkID = 0; chunkID < response_parsed["total_chunks"]; ++chunkID)
+    //     {
+    //         // Create JSON request with chunk_id and file_hash
+    //         json chunkRequest;
+    //         chunkRequest["chunk_id"] = chunkID;
+    //         chunkRequest["file_hash"] = file_hash;
+
+    //         // Convert the JSON request to a string and send it
+    //         std::string chunkRequestStr = chunkRequest.dump(); // Serialize JSON to string
+    //         send(sockfd, chunkRequestStr.c_str(), chunkRequestStr.length(), 0);
+    //         // debug
+    //         cout<<"Request message for chunk "<<chunkID<<" sent successfully"<<endl;
+    //         // Receive the chunk data
+    //         char buffer[1024];
+    //         std::string chunkData;
+    //         ssize_t bytesRead;
+
+    //         // Loop to handle receiving large amounts of data
+    //         while ((bytesRead = recv(sockfd, buffer, sizeof(buffer), 0)) > 0)
+    //         {
+    //             chunkData.append(buffer, bytesRead);
+    //         }
+
+    //         // Save the chunk data (this would normally append to the actual file)
+    //         std::ofstream outFile("_downloaded_chunk_" + std::to_string(chunkID), std::ios::binary | std::ios::app);
+    //         outFile.write(chunkData.data(), chunkData.size());
+    //         outFile.close();
+
+    //         std::cout << "Downloaded chunk " << chunkID << " from " << peerIP << ":" << peerPort << "\n";
+    //     }
+
+    //     close(sockfd);
+    // }
+
+    // Request specific chunks (for example, chunk 1, 2, etc.)
+    filesystem::path directory_path = "./download/" + file_hash;
+        
+    // if directory exists then delete it completely
+    if (filesystem::exists(directory_path) && filesystem::is_directory(directory_path))
+        filesystem::remove_all(directory_path);
+
+    // create fresh directory
+    if (filesystem::create_directory(directory_path))
+        cout << "Directory created successfully." << endl;
+    else
+        cout << "Directory creation failed or already exists." << endl;
+
+    for (int chunkID = 0; chunkID < response_parsed["total_chunks"]; ++chunkID)
+    {   
+        cout <<"Details are : PeerIP: "<< peerIP<<" PeerPort: "<<peerPort << endl;
+
         int sockfd = socket(AF_INET, SOCK_STREAM, 0);
         if (sockfd < 0)
         {
@@ -315,6 +402,7 @@ void PeerClient::download_file(const std::string &file_hash)
         if (inet_pton(AF_INET, peerIP.c_str(), &peerAddr.sin_addr) <= 0)
         {
             std::cerr << "Invalid peer IP address\n";
+            perror("Error details");
             close(sockfd);
             continue;
         }
@@ -322,43 +410,44 @@ void PeerClient::download_file(const std::string &file_hash)
         if (connect(sockfd, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) < 0)
         {
             std::cerr << "Failed to connect to peer: " << peerIP << ":" << peerPort << "\n";
+            perror("Error details");
             close(sockfd);
             continue;
         }
 
-        // Request specific chunks (for example, chunk 1, 2, etc.)
-        for (int chunkID = 1; chunkID <= response_parsed["total_chunks"]; ++chunkID)
+        // Create JSON request with chunk_id and file_hash
+        json chunkRequest;
+        chunkRequest["chunk_id"] = chunkID;
+        chunkRequest["file_hash"] = file_hash;
+
+        // Convert the JSON request to a string and send it
+        std::string chunkRequestStr = chunkRequest.dump(); // Serialize JSON to string
+        send(sockfd, chunkRequestStr.c_str(), chunkRequestStr.length(), 0);
+        // debug
+        cout<<"Request message for chunk "<<chunkID<<" sent successfully"<<endl;
+        // Receive the chunk data
+        char buffer[1024];
+        std::string chunkData;
+        ssize_t bytesRead;
+
+        // Loop to handle receiving large amounts of data
+        while ((bytesRead = recv(sockfd, buffer, sizeof(buffer), 0)) > 0)
         {
-            // Create JSON request with chunk_id and file_hash
-            json chunkRequest;
-            chunkRequest["chunk_id"] = chunkID;
-            chunkRequest["file_hash"] = file_hash;
-
-            // Convert the JSON request to a string and send it
-            std::string chunkRequestStr = chunkRequest.dump(); // Serialize JSON to string
-            send(sockfd, chunkRequestStr.c_str(), chunkRequestStr.length(), 0);
-
-            // Receive the chunk data
-            char buffer[1024];
-            std::string chunkData;
-            ssize_t bytesRead;
-
-            // Loop to handle receiving large amounts of data
-            while ((bytesRead = recv(sockfd, buffer, sizeof(buffer), 0)) > 0)
-            {
-                chunkData.append(buffer, bytesRead);
-            }
-
-            // Save the chunk data (this would normally append to the actual file)
-            std::ofstream outFile("_downloaded_chunk_" + std::to_string(chunkID), std::ios::binary | std::ios::app);
-            outFile.write(chunkData.data(), chunkData.size());
-            outFile.close();
-
-            std::cout << "Downloaded chunk " << chunkID << " from " << peerIP << ":" << peerPort << "\n";
+            chunkData.append(buffer, bytesRead);
         }
 
+        string path = "./download/" + file_hash + "/";
+        cout << path << endl;
+        // Save the chunk data (this would normally append to the actual file)
+        std::ofstream outFile(path + std::to_string(chunkID) + ".bin", std::ios::binary);
+        outFile.write(chunkData.data(), chunkData.size());
+        outFile.close();
+
+        std::cout << "Downloaded chunk " << chunkID << " from " << peerIP << ":" << peerPort << "\n";
         close(sockfd);
     }
+
+    createFileFromChunks(file_hash);
 }
 
 void PeerClient::handle_disconnection()
