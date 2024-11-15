@@ -68,6 +68,7 @@ void printFileTable()
         for (const auto &[peer_id, peer_info] : file_info.peer_list)
         {
             std::cout << "    Peer ID: " << peer_id << "\n";
+            std::cout << "    Peer port: " << peer_info.port << "\n";
             std::cout << "      Chunks owned by this peer: ";
             for (int chunk_id : peer_info.chunk_ids)
             {
@@ -90,7 +91,7 @@ public:
 
     bool start();
     void handle_client(int client_socket);
-    void register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id);
+    void register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id, int port);
     std::vector<int> get_chunk_locations(const std::string &file_hash, int chunk_id);
     std::vector<std::pair<std::string, std::string>> list_files();
     void send_chunk_data(int client_socket, const std::string &file_hash, int chunk_id);
@@ -180,10 +181,11 @@ void CentralizedServer::handle_client(int client_socket)
             std::string file_hash = request_json["file_hash"];
             std::string file_name = request_json["file_name"];
             int peer_id = request_json["peer_id"];
+            int port = request_json["port"];
 
             for (int chunk_id : request_json["chunks"])
             {
-                register_chunk(file_hash, file_name, chunk_id, peer_id);
+                register_chunk(file_hash, file_name, chunk_id, peer_id, port);
                 std::cout << "Registered chunk " << chunk_id << " for file " << file_name << std::endl;
             }
 
@@ -287,7 +289,7 @@ void CentralizedServer::handle_client(int client_socket)
     printFileTable();
 }
 
-void CentralizedServer::register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id)
+void CentralizedServer::register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id, int port)
 {
     std::lock_guard<std::mutex> lock(file_table_mutex);
 
@@ -307,7 +309,7 @@ void CentralizedServer::register_chunk(const std::string &file_hash, const std::
     // Update peer info
     if (file_info.peer_list.find(peer_id) == file_info.peer_list.end())
     {
-        file_info.peer_list[peer_id] = PeerInfo{peer_id};
+        file_info.peer_list[peer_id] = PeerInfo{peer_id, port};
     }
     file_info.peer_list[peer_id].chunk_ids.insert(chunk_id);
 

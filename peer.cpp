@@ -361,53 +361,6 @@ void PeerClient::download_file(const std::string &file_hash)
     }
 }
 
-// void PeerClient::download_file(const std::string &file_hash, int total_chunks)
-// {
-//     // Step 1: Send request to server for file chunks
-//     std::string message = "REQUEST_FILE " + file_hash;
-//     send(sock, message.c_str(), message.size(), 0);
-
-//     // Receive response from server with available chunk details (dummy for now)
-//     char buffer[1024] = {0};
-//     read(sock, buffer, 1024);
-
-//     std::cout << "Server response: " << buffer << std::endl;
-
-//     // Step 2: Download each chunk and reconstruct the file
-//     for (int i = 0; i < total_chunks; ++i)
-//     {
-//         receive_chunk(file_hash, i);
-//     }
-
-//     // Step 3: After downloading all chunks, create the file from chunks
-//     createFileFromChunks(file_hash);
-// }
-
-// void PeerClient::receive_chunk(const std::string &file_hash, int chunk_id)
-// {
-//     std::string message = "LOCATE " + file_hash + " " + std::to_string(chunk_id);
-//     send(sock, message.c_str(), message.size(), 0);
-
-//     char buffer[1024] = {0};
-//     int bytes_read = read(sock, buffer, 1024);
-//     if (bytes_read <= 0)
-//     {
-//         handle_disconnection();
-//         return;
-//     }
-
-//     std::string chunk_data(buffer, bytes_read);
-//     ChunkInfo chunk;
-//     chunk.chunk_id = chunk_id;
-//     chunk.data = chunk_data;
-
-//     std::ofstream output_file(file_hash + "_" + std::to_string(chunk_id), std::ios::binary);
-//     output_file << chunk.data;
-//     output_file.close();
-
-//     std::cout << "Received chunk " << chunk_id << " for file " << file_hash << "\n";
-// }
-
 void PeerClient::handle_disconnection()
 {
     std::cerr << "Disconnected from server. Attempting to reconnect...\n";
@@ -437,7 +390,7 @@ void getAvailableFiles(PeerClient &peer)
     std::cout << "Available files to download:\n";
     for (const auto &file : files)
 {
-    std::cout << " - File Hash: " << file.first << ", File Name: " << file.second << "\n";
+    std::cout << " - File Hash: " << file.first << " ; File Name: " << file.second << "\n";
 }
 }
 
