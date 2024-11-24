@@ -18,7 +18,6 @@
 #include <sys/time.h>
 
 #define CENTRAL_SERVER_PORT 8080
-#define CENTRAL_SERVER_IP "127.0.0.1"
 #define MAX_RETRIES 5
 #define THREAD_COUNT 10
 #define SENDER_THREAD_COUNT 10
@@ -210,13 +209,13 @@ private:
     int peer_id;
     struct sockaddr_in central_server_address;
     std::thread listener_thread;
-    std::string server_ip = "127.0.0.1";
+    const char* central_server_ip;
     int server_port;
     ThreadPool thread_pool;
 
 public:
-    PeerClient(const std::string &ip, int port, int id, size_t pool_size = SENDER_THREAD_COUNT)
-        : server_ip(ip), server_port(port), peer_id(id), thread_pool(pool_size)
+    PeerClient(const char* ip, int port, int id, size_t pool_size = SENDER_THREAD_COUNT)
+        : central_server_ip(ip), server_port(port), peer_id(id), thread_pool(pool_size)
     {
         sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0)
@@ -226,7 +225,7 @@ public:
         }
         central_server_address.sin_family = AF_INET;
         central_server_address.sin_port = htons(CENTRAL_SERVER_PORT);
-        inet_pton(AF_INET, CENTRAL_SERVER_IP, &central_server_address.sin_addr);
+        inet_pton(AF_INET, central_server_ip, &central_server_address.sin_addr);
         listener_thread = std::thread(&PeerClient::handle_download_requests, this);
         std::cout << "peer port:  " << server_port << std::endl;
     }
@@ -750,9 +749,12 @@ int main()
 {
     std::cout << "Enter peer port:\n";
     int port;
+    std::string central_server_ip;
     std::cin >> port;
+    std::cout << "Enter central server ip:\n";
+    std::cin >> central_server_ip;
     int peer_id = port; 
-    PeerClient peer("127.0.0.1", port, peer_id);
+    PeerClient peer(central_server_ip.c_str(), port, peer_id);
 
     if (!peer.connect_to_server())
     {
