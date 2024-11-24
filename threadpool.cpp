@@ -1,6 +1,5 @@
 #include "threadpool.h"
 
-// Constructor to initialize the thread pool with a given number of threads
 ThreadPool::ThreadPool(size_t num_threads) : stop(false) {
     for (size_t i = 0; i < num_threads; ++i) {
         workers.emplace_back([this] {
@@ -19,7 +18,6 @@ ThreadPool::ThreadPool(size_t num_threads) : stop(false) {
     }
 }
 
-// Destructor to join all threads before shutdown
 ThreadPool::~ThreadPool() {
     {
         std::unique_lock<std::mutex> lock(mtx);
@@ -33,7 +31,6 @@ ThreadPool::~ThreadPool() {
     }
 }
 
-// Function to add a new task to the task queue
 void ThreadPool::enqueue(std::function<void()> task) {
     {
         std::unique_lock<std::mutex> lock(mtx);
