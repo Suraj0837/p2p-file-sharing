@@ -11,8 +11,327 @@
 #include <unistd.h>
 #include <filesystem>
 #include "utilities.h"
+#include "threadpool.h"
+#include <unordered_map>
+#include <deque>
+#include <random>
 
 #define CENTRAL_SERVER_PORT 8080
+#define MAX_RETRIES 5
+#define THREAD_COUNT 10
+
+// things required for multithreaded implementation
+struct DownloadInfo{
+    // string peer_ip;
+    string file_hash;
+    int chunk_id;
+};
+
+
+
+pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t status_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t dir_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t server_message_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t retry_count_lock = PTHREAD_MUTEX_INITIALIZER;
+
+pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
+
+deque<struct DownloadInfo*> request_queue;
+unordered_map<string, bool> status;
+bool kill_threads = false;
+
+unordered_map<string, string> server_message;
+unordered_map<string, int> retry_count;
+
+void *downloader_thread(void *){
+    while(true){
+        
+        pthread_mutex_lock(&queue_lock);
+        while(request_queue.empty() && !kill_threads)
+            pthread_cond_wait(&condition, &queue_lock);
+
+        if(request_queue.empty() && kill_threads)
+            pthread_exit(NULL);
+
+        struct DownloadInfo* front = request_queue.front();
+        request_queue.pop_front();
+
+        pthread_mutex_unlock(&queue_lock);
+
+        string file_hash = front->file_hash;
+        int chunkID = front->chunk_id;
+
+        // Get the peer list for the file hash
+        pthread_mutex_lock(&server_message_lock);
+            string response = server_message[file_hash];
+        pthread_mutex_unlock(&server_message_lock);
+
+        auto peerAddresses = parsePeerList(response); // Now returns both IP and port
+        delete front;
+
+        pthread_mutex_lock(&dir_lock);
+        filesystem::path directory_path = "./chunkked/" + file_hash;
+        if (!(filesystem::exists(directory_path) && filesystem::is_directory(directory_path))){
+            if (filesystem::create_directory(directory_path))
+                cout << "Directory created successfully." << endl;
+            else
+                cout << "Directory creation failed or already exists." << endl;
+        }
+        pthread_mutex_unlock(&dir_lock);
+
+        bool downloadSuccess = false;
+        int retryCount = 0;
+
+        // Loop through the peer list until the download is successful or max retries are reached
+        for (auto &[peerIP, peerPort] : peerAddresses) {
+            cout << "Trying to connect to PeerIP: " << peerIP << " PeerPort: " << peerPort << endl;
+
+            int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+            if (sockfd < 0) {
+                std::cerr << "Error creating socket\n";
+                continue;
+            }
+
+            struct sockaddr_in peerAddr;
+            peerAddr.sin_family = AF_INET;
+            peerAddr.sin_port = htons(peerPort);
+            if (inet_pton(AF_INET, peerIP.c_str(), &peerAddr.sin_addr) <= 0) {
+                std::cerr << "Invalid peer IP address\n";
+                perror("Error details");
+                close(sockfd);
+                continue;
+            }
+
+            // Attempt connection to the peer
+            if (connect(sockfd, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) < 0) {
+                std::cerr << "Failed to connect to peer: " << peerIP << ":" << peerPort << "\n";
+                perror("Error details");
+                close(sockfd);
+                continue; // Move on to the next peer in the list
+            }
+
+            // Create JSON request with chunk_id and file_hash
+            json chunkRequest;
+            chunkRequest["chunk_id"] = chunkID;
+            chunkRequest["file_hash"] = file_hash;
+
+            // Convert the JSON request to a string and send it
+            std::string chunkRequestStr = chunkRequest.dump(); // Serialize JSON to string
+            send(sockfd, chunkRequestStr.c_str(), chunkRequestStr.length(), 0);
+            // debug
+            cout << "Request message for chunk " << chunkID << " sent successfully" << endl;
+
+            // Receive the chunk data
+            char buffer[1024];
+            std::string chunkData;
+            ssize_t bytesRead;
+
+            // Loop to handle receiving large amounts of data
+            while ((bytesRead = recv(sockfd, buffer, sizeof(buffer), 0)) > 0) {
+                chunkData.append(buffer, bytesRead);
+            }
+
+            if (chunkData.size()) {
+                cout << "Chunk " << chunkID << " received successfully" << endl;
+                pthread_mutex_lock(&dir_lock);
+                string path = "./chunkked/" + file_hash + "/";
+        
+                // Save the chunk data (this would normally append to the actual file)
+                std::ofstream outFile(path + std::to_string(chunkID) + ".bin", std::ios::binary);
+                outFile.write(chunkData.data(), chunkData.size());
+                outFile.close();
+                pthread_mutex_unlock(&dir_lock);
+                std::cout << "Downloaded chunk " << chunkID << " from " << peerIP << ":" << peerPort << "\n";
+                close(sockfd);
+
+                pthread_mutex_lock(&status_lock);
+                status[file_hash + ":" + to_string(chunkID)] = true;
+                pthread_mutex_unlock(&status_lock);
+                
+                downloadSuccess = true;  // Successfully downloaded
+                break;  // Exit the loop as the download was successful
+            } else {
+                cout << "Chunk " << chunkID << " - failed receiving...retrying" << endl;
+
+                pthread_mutex_lock(&retry_count_lock);
+                retry_count[file_hash + ":" + to_string(chunkID)]++;
+                int count = retry_count[file_hash + ":" + to_string(chunkID)];
+                pthread_mutex_unlock(&retry_count_lock);
+
+                // If maximum retries are done, don't add back to the queue
+                if (count == MAX_RETRIES) {
+                    break;  // Max retries reached, stop attempting for this chunk
+                }
+
+                pthread_mutex_lock(&status_lock);
+                status[file_hash + ":" + to_string(chunkID)] = false;
+                pthread_mutex_unlock(&status_lock);
+
+                // Re-add to queue for retry from another peer
+                pthread_mutex_lock(&queue_lock);
+                struct DownloadInfo* request = new DownloadInfo();
+                request->chunk_id = chunkID;
+                request->file_hash = file_hash;
+                // request->peer_ip = peerIP;  // Optional if you want to store peer IP
+                request_queue.push_back(request);
+                pthread_mutex_unlock(&queue_lock);
+            }
+        }
+
+        if (!downloadSuccess) {
+            cout << "Max retries reached. Chunk " << chunkID << " could not be downloaded." << endl;
+        }
+    }
+}
+
+
+
+// void *downloader_thread(void *){
+//     std::random_device rd; // Seed
+//     std::mt19937 gen(rd()); // Mersenne Twister engine
+    
+//     while(true){
+        
+//         pthread_mutex_lock(&queue_lock);
+//         while(request_queue.empty() && !kill_threads)
+//             pthread_cond_wait(&condition, &queue_lock);
+
+//         if(request_queue.empty() && kill_threads)
+//             pthread_exit(NULL);
+
+//         struct DownloadInfo* front = request_queue.front();
+//         request_queue.pop_front();
+
+//         pthread_mutex_unlock(&queue_lock);
+
+//         // string peerIP = front->peer_ip;
+//         string file_hash = front->file_hash;
+//         int chunkID = front->chunk_id;
+
+//         // get random peerIp
+//         pthread_mutex_lock(&server_message_lock);
+//             string response = server_message[file_hash];
+//         pthread_mutex_unlock(&server_message_lock);
+
+//         auto peerAddresses = parsePeerList(response);
+//         std::uniform_int_distribution<> dist(0, peerAddresses.size() - 1);
+//         auto &[peerIP, ignorePort] = peerAddresses[dist(gen)];
+        
+//         delete front;
+
+//         pthread_mutex_lock(&dir_lock);
+//         filesystem::path directory_path = "./download/" + file_hash;
+//         if (!(filesystem::exists(directory_path) && filesystem::is_directory(directory_path))){
+//             if (filesystem::create_directory(directory_path))
+//                 cout << "Directory created successfully." << endl;
+//             else
+//                 cout << "Directory creation failed or already exists." << endl;
+//         }
+//         pthread_mutex_unlock(&dir_lock);
+
+//         // randomly use port between 9000 and 9010
+//         // but hardcoded for now
+//         int peerPort = 8081;
+//         cout <<"Details are : PeerIP: "<< peerIP<<" PeerPort: "<<peerPort << endl;
+
+
+//         int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+//         if (sockfd < 0)
+//         {
+//             std::cerr << "Error creating socket\n";
+//             continue;
+//         }
+
+//         struct sockaddr_in peerAddr;
+//         peerAddr.sin_family = AF_INET;
+//         peerAddr.sin_port = htons(peerPort);
+//         if (inet_pton(AF_INET, peerIP.c_str(), &peerAddr.sin_addr) <= 0)
+//         {
+//             std::cerr << "Invalid peer IP address\n";
+//             perror("Error details");
+//             close(sockfd);
+//             continue;
+//         }
+//         // cout << "Connection Request sent " << endl;
+//         if (connect(sockfd, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) < 0)
+//         {
+//             std::cerr << "Failed to connect to peer: " << peerIP << ":" << peerPort << "\n";
+//             perror("Error details");
+//             close(sockfd);
+//             continue;
+//         }
+
+//         // cout << "Connection Established" << endl;
+//         // Create JSON request with chunk_id and file_hash
+//         json chunkRequest;
+//         chunkRequest["chunk_id"] = chunkID;
+//         chunkRequest["file_hash"] = file_hash;
+
+//         // Convert the JSON request to a string and send it
+//         std::string chunkRequestStr = chunkRequest.dump(); // Serialize JSON to string
+//         send(sockfd, chunkRequestStr.c_str(), chunkRequestStr.length(), 0);
+//         // debug
+//         cout<<"Request message for chunk "<<chunkID<<" sent successfully"<<endl;
+
+//         // Receive the chunk data
+//         char buffer[1024];
+//         std::string chunkData;
+//         ssize_t bytesRead;
+
+//         // Loop to handle receiving large amounts of data
+//         while ((bytesRead = recv(sockfd, buffer, sizeof(buffer), 0)) > 0)
+//         {
+//             chunkData.append(buffer, bytesRead);
+//         }
+
+
+//         if(chunkData.size()){
+//             cout << "Chunk " << chunkID << " recevied successfully" << endl;
+//             pthread_mutex_lock(&dir_lock);
+//                 string path = "./download/" + file_hash + "/";
+        
+//                 // Save the chunk data (this would normally append to the actual file)
+//                 std::ofstream outFile(path + std::to_string(chunkID) + ".bin", std::ios::binary);
+//                 outFile.write(chunkData.data(), chunkData.size());
+//                 outFile.close();
+//             pthread_mutex_unlock(&dir_lock);
+//             std::cout << "Downloaded chunk " << chunkID << " from " << peerIP << ":" << peerPort << "\n";
+//             close(sockfd);
+            
+//             pthread_mutex_lock(&status_lock);
+//                 status[file_hash+ ":" + to_string(chunkID)] = true;
+//             pthread_mutex_unlock(&status_lock);
+
+//         }
+//         else{
+
+//             pthread_mutex_lock(&retry_count_lock);
+//                 retry_count[file_hash+":"+to_string(chunkID)]++;
+//                 int count = retry_count[file_hash+":"+to_string(chunkID)];
+//             pthread_mutex_unlock(&retry_count_lock);
+            
+//             // if maximum retries are done, then don't add back to the queue
+//             if(count == MAX_RETRIES) continue;
+
+//             cout << "Chunk " << chunkID << " - failed receiving...retrying" << endl;
+//             pthread_mutex_lock(&status_lock);
+//                 status[file_hash+ ":" + to_string(chunkID)] = false;
+//             pthread_mutex_unlock(&status_lock);
+
+//             pthread_mutex_lock(&queue_lock);
+//                 struct DownloadInfo* request = new DownloadInfo();;
+//                 request->chunk_id = chunkID;
+//                 request->file_hash = file_hash;
+//                 // request->peer_ip = peerIP;
+
+//                 request_queue.push_back(request);
+//             pthread_mutex_unlock(&queue_lock);
+//         }
+//     }
+// }
+
+
 
 // Data Structures
 struct ChunkInfo
@@ -20,6 +339,8 @@ struct ChunkInfo
     int chunk_id;
     std::string data;
 };
+
+
 
 class PeerClient
 {
@@ -30,10 +351,11 @@ private:
     std::thread listener_thread;
     std::string server_ip = "127.0.0.1";
     int server_port;
+    ThreadPool thread_pool; 
 
 public:
-    PeerClient(const std::string &ip, int port, int id)
-        : server_ip(ip), server_port(port), peer_id(id)
+    PeerClient(const std::string &ip, int port, int id, size_t pool_size = 4)
+        : server_ip(ip), server_port(port), peer_id(id), thread_pool(pool_size)
     {
         sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0)
@@ -48,6 +370,7 @@ public:
         std::cout<<"peer port:  "<<server_port<<std::endl;
     }
 
+    void handle_connection(int client_socket);
     void handle_download_requests();
     bool connect_to_server();
     bool disconnect_from_server();
@@ -58,7 +381,9 @@ public:
     void download_file(const std::string &file_hash);
     void receive_chunk(const std::string &file_hash, int chunk_id);
     void handle_disconnection();
+    std::string getFileName(const std::string &filehash);
     std::string requestPeerListFromServer(std::string file_hash);
+    void registerPeer(const std::string &file_hash, int peer_id, int peer_port);
     // destructor
     ~PeerClient()
     {
@@ -69,6 +394,51 @@ public:
         close(sock);
     }
 };
+
+std::string PeerClient::getFileName(const std::string &filehash)
+{
+    json message;
+    message["command"] = "GET_FILE_NAME";
+    message["file_hash"] = filehash; // Add file hash to the request
+
+    // Convert JSON to string and send
+    std::string message_str = message.dump();
+    int result = send(sock, message_str.c_str(), message_str.size(), 0);
+    if (result < 0)
+    {
+        std::cerr << "Socket error or disconnected\n";
+        return ""; // Return empty string on error
+    }
+
+    // Receive the response
+    char buffer[1024] = {0};
+    int bytes_read = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_read <= 0)
+    {
+        std::cerr << "Failed to receive response from server\n";
+        return ""; // Return empty string on error
+    }
+
+    // Parse the response
+    try
+    {
+        json response = json::parse(std::string(buffer, bytes_read));
+        if (response["status"] == "success")
+        {
+            return response["file_name"]; // Return the file name on success
+        }
+        else
+        {
+            std::cerr << "Error: " << response["message"] << "\n";
+            return ""; // Return empty string on failure
+        }
+    }
+    catch (json::parse_error &e)
+    {
+        std::cerr << "Invalid JSON response: " << e.what() << "\n";
+        return ""; // Return empty string on error
+    }
+}
 
 bool PeerClient::connect_to_server()
 {
@@ -213,11 +583,56 @@ std::vector<std::pair<std::string, std::string>> PeerClient::get_available_files
     return files; // Return the vector of files
 }
 
-void PeerClient::handle_download_requests()
-{
+// void PeerClient::handle_download_requests()
+// {
+//     int listener_sock = socket(AF_INET, SOCK_STREAM, 0);
+//     if (listener_sock < 0)
+//     {
+//         perror("Socket creation error for peer listener");
+//         return;
+//     }
+
+//     struct sockaddr_in listener_addr;
+//     listener_addr.sin_family = AF_INET;
+//     listener_addr.sin_addr.s_addr = INADDR_ANY;
+//     // listener_addr.sin_port = htons(0); // Let OS pick a port
+//     listener_addr.sin_port = htons(this->server_port);
+
+//     if (bind(listener_sock, (struct sockaddr *)&listener_addr, sizeof(listener_addr)) < 0)
+//     {
+//         perror("Bind failed for peer listener");
+//         return;
+//     }
+
+//     listen(listener_sock, 5);
+
+//     while (true)
+//     {
+//         int client_socket = accept(listener_sock, NULL, NULL);
+//         if (client_socket >= 0)
+//         {
+//             char buffer[1024] = {0};
+//             read(client_socket, buffer, 1024);
+//             cout<<"Receieved message "<< buffer<< endl;
+
+//             json request = json::parse(buffer);
+
+//             int chunk_id = request["chunk_id"];
+//             std::string file_hash = request["file_hash"];
+
+//             // cout<<"Extracted Chunk id: " << chunk_id << "Extracted File hash: "<< file_hash << endl;
+//             // Simulate sending chunk data
+//             // cout <<"Invoking send chunk"<<endl;
+//             send_chunk(client_socket, chunk_id, file_hash);
+//             cout << "Data sent successfully...Closing connection"<< endl;
+//             close(client_socket);
+//         }
+//     }
+// }
+
+void PeerClient::handle_download_requests() {
     int listener_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (listener_sock < 0)
-    {
+    if (listener_sock < 0) {
         perror("Socket creation error for peer listener");
         return;
     }
@@ -225,39 +640,39 @@ void PeerClient::handle_download_requests()
     struct sockaddr_in listener_addr;
     listener_addr.sin_family = AF_INET;
     listener_addr.sin_addr.s_addr = INADDR_ANY;
-    // listener_addr.sin_port = htons(0); // Let OS pick a port
     listener_addr.sin_port = htons(this->server_port);
 
-    if (bind(listener_sock, (struct sockaddr *)&listener_addr, sizeof(listener_addr)) < 0)
-    {
+    if (bind(listener_sock, (struct sockaddr *)&listener_addr, sizeof(listener_addr)) < 0) {
         perror("Bind failed for peer listener");
         return;
     }
 
     listen(listener_sock, 5);
 
-    while (true)
-    {
+    while (true) {
         int client_socket = accept(listener_sock, NULL, NULL);
-        if (client_socket >= 0)
-        {
-            char buffer[1024] = {0};
-            read(client_socket, buffer, 1024);
-            cout<<"Receieved message "<< buffer<< endl;
-
-            json request = json::parse(buffer);
-
-            int chunk_id = request["chunk_id"];
-            std::string file_hash = request["file_hash"];
-
-            // cout<<"Extracted Chunk id: " << chunk_id << "Extracted File hash: "<< file_hash << endl;
-            // Simulate sending chunk data
-            // cout <<"Invoking send chunk"<<endl;
-            send_chunk(client_socket, chunk_id, file_hash);
-            cout << "Data sent successfully...Closing connection"<< endl;
-            close(client_socket);
+        if (client_socket >= 0) {
+            // Enqueue the connection to the thread pool
+            thread_pool.enqueue([this, client_socket] {
+                handle_connection(client_socket);
+            });
         }
     }
+}
+
+void PeerClient::handle_connection(int client_socket) {
+    char buffer[1024] = {0};
+    read(client_socket, buffer, 1024);
+    std::cout << "Received message: " << buffer << std::endl;
+
+    json request = json::parse(buffer);
+    int chunk_id = request["chunk_id"];
+    std::string file_hash = request["file_hash"];
+
+    // Simulate sending chunk data
+    send_chunk(client_socket, chunk_id, file_hash);
+    std::cout << "Data sent successfully... Closing connection" << std::endl;
+    close(client_socket);
 }
 
 std::string PeerClient::requestPeerListFromServer(std::string file_hash)
@@ -297,6 +712,31 @@ std::string PeerClient::requestPeerListFromServer(std::string file_hash)
     return response;
 }
 
+void PeerClient::registerPeer(const std::string &file_hash, int peer_id, int peer_port)
+{
+    json message;
+    message["command"] = "REGISTER_PEER";
+    message["file_hash"] = file_hash;
+    message["peer_id"] = peer_id;
+    message["port"] = peer_port;
+
+    std::string message_str = message.dump();
+    int result = send(sock, message_str.c_str(), message_str.size(), 0);
+    if (result < 0)
+    {
+        std::cerr << "Failed to send REGISTER_PEER request\n";
+        return;
+    }
+
+    char buffer[1024] = {0};
+    int bytes_read = recv(sock, buffer, sizeof(buffer), 0);
+    if (bytes_read > 0)
+    {
+        std::cout << "Response from server: " << std::string(buffer, bytes_read) << std::endl;
+    }
+}
+
+
 void PeerClient::download_file(const std::string &file_hash)
 {
     // Request peer list from the server
@@ -304,151 +744,83 @@ void PeerClient::download_file(const std::string &file_hash)
     auto peerAddresses = parsePeerList(response);
     json response_parsed = json::parse(response);
 
+    pthread_mutex_lock(&server_message_lock);
+        server_message[file_hash] = response;
+    pthread_mutex_unlock(&server_message_lock);
+
     // hardcoding temporarily
-    auto &[peerIP, peerPort] = peerAddresses[0];
-    // Connect to each peer and request specific chunks of the file
-    // for (const auto &[peerIP, peerPort] : peerAddresses)
-    // {   
-    //     cout <<"Details are : PeerIP: "<< peerIP<<" PeerPort: "<<peerPort << endl;
+    // auto &[peerIP, peerPort] = peerAddresses[0];
 
-    //     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    //     if (sockfd < 0)
-    //     {
-    //         std::cerr << "Error creating socket\n";
-    //         continue;
-    //     }
-
-    //     struct sockaddr_in peerAddr;
-    //     peerAddr.sin_family = AF_INET;
-    //     peerAddr.sin_port = htons(peerPort);
-    //     if (inet_pton(AF_INET, peerIP.c_str(), &peerAddr.sin_addr) <= 0)
-    //     {
-    //         std::cerr << "Invalid peer IP address\n";
-    //         perror("Error details");
-    //         close(sockfd);
-    //         continue;
-    //     }
-
-    //     if (connect(sockfd, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) < 0)
-    //     {
-    //         std::cerr << "Failed to connect to peer: " << peerIP << ":" << peerPort << "\n";
-    //         perror("Error details");
-    //         close(sockfd);
-    //         continue;
-    //     }
-
-    //     // Request specific chunks (for example, chunk 1, 2, etc.)
-    //     for (int chunkID = 0; chunkID < response_parsed["total_chunks"]; ++chunkID)
-    //     {
-    //         // Create JSON request with chunk_id and file_hash
-    //         json chunkRequest;
-    //         chunkRequest["chunk_id"] = chunkID;
-    //         chunkRequest["file_hash"] = file_hash;
-
-    //         // Convert the JSON request to a string and send it
-    //         std::string chunkRequestStr = chunkRequest.dump(); // Serialize JSON to string
-    //         send(sockfd, chunkRequestStr.c_str(), chunkRequestStr.length(), 0);
-    //         // debug
-    //         cout<<"Request message for chunk "<<chunkID<<" sent successfully"<<endl;
-    //         // Receive the chunk data
-    //         char buffer[1024];
-    //         std::string chunkData;
-    //         ssize_t bytesRead;
-
-    //         // Loop to handle receiving large amounts of data
-    //         while ((bytesRead = recv(sockfd, buffer, sizeof(buffer), 0)) > 0)
-    //         {
-    //             chunkData.append(buffer, bytesRead);
-    //         }
-
-    //         // Save the chunk data (this would normally append to the actual file)
-    //         std::ofstream outFile("_downloaded_chunk_" + std::to_string(chunkID), std::ios::binary | std::ios::app);
-    //         outFile.write(chunkData.data(), chunkData.size());
-    //         outFile.close();
-
-    //         std::cout << "Downloaded chunk " << chunkID << " from " << peerIP << ":" << peerPort << "\n";
-    //     }
-
-    //     close(sockfd);
-    // }
-
-    // Request specific chunks (for example, chunk 1, 2, etc.)
-    filesystem::path directory_path = "./download/" + file_hash;
-        
-    // if directory exists then delete it completely
-    if (filesystem::exists(directory_path) && filesystem::is_directory(directory_path))
-        filesystem::remove_all(directory_path);
-
-    // create fresh directory
-    if (filesystem::create_directory(directory_path))
-        cout << "Directory created successfully." << endl;
-    else
-        cout << "Directory creation failed or already exists." << endl;
-
-    for (int chunkID = 0; chunkID < response_parsed["total_chunks"]; ++chunkID)
-    {   
-        cout <<"Details are : PeerIP: "<< peerIP<<" PeerPort: "<<peerPort << endl;
-
-        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0)
-        {
-            std::cerr << "Error creating socket\n";
-            continue;
+    //set status map
+    pthread_mutex_lock(&status_lock);
+        for(int chunkId = 0; chunkId < response_parsed["total_chunks"]; chunkId++){
+            status[file_hash+":"+to_string(chunkId)] = false;
         }
+    pthread_mutex_unlock(&status_lock);   
 
-        struct sockaddr_in peerAddr;
-        peerAddr.sin_family = AF_INET;
-        peerAddr.sin_port = htons(peerPort);
-        if (inet_pton(AF_INET, peerIP.c_str(), &peerAddr.sin_addr) <= 0)
-        {
-            std::cerr << "Invalid peer IP address\n";
-            perror("Error details");
-            close(sockfd);
-            continue;
+    //set retry count map
+    pthread_mutex_lock(&retry_count_lock);
+        for(int chunkId = 0; chunkId < response_parsed["total_chunks"]; chunkId++){
+            retry_count[file_hash+":"+to_string(chunkId)] = 0;
         }
+    pthread_mutex_unlock(&retry_count_lock);   
 
-        if (connect(sockfd, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) < 0)
-        {
-            std::cerr << "Failed to connect to peer: " << peerIP << ":" << peerPort << "\n";
-            perror("Error details");
-            close(sockfd);
-            continue;
+    // initialize threads
+    pthread_t threads[THREAD_COUNT];
+    for(int i = 0; i < THREAD_COUNT; i++){
+        int rc = pthread_create(threads+i, NULL, &downloader_thread, NULL);
+        if (rc != 0){
+            std::cerr << "Error creating thread " << i << ": " << strerror(rc) << std::endl;
         }
+    }
+    cout<<"Threads are created"<<endl;
 
-        // Create JSON request with chunk_id and file_hash
-        json chunkRequest;
-        chunkRequest["chunk_id"] = chunkID;
-        chunkRequest["file_hash"] = file_hash;
 
-        // Convert the JSON request to a string and send it
-        std::string chunkRequestStr = chunkRequest.dump(); // Serialize JSON to string
-        send(sockfd, chunkRequestStr.c_str(), chunkRequestStr.length(), 0);
-        // debug
-        cout<<"Request message for chunk "<<chunkID<<" sent successfully"<<endl;
-        // Receive the chunk data
-        char buffer[1024];
-        std::string chunkData;
-        ssize_t bytesRead;
+    for(int chunkId = 0; chunkId < response_parsed["total_chunks"]; chunkId++){
+        struct DownloadInfo* request = new DownloadInfo();
+        request->chunk_id = chunkId;
+        request->file_hash = file_hash;
+        // request->peer_ip = peerIP;
 
-        // Loop to handle receiving large amounts of data
-        while ((bytesRead = recv(sockfd, buffer, sizeof(buffer), 0)) > 0)
-        {
-            chunkData.append(buffer, bytesRead);
+        pthread_mutex_lock(&queue_lock);
+            request_queue.push_back(request);
+            pthread_cond_signal(&condition);
+        pthread_mutex_unlock(&queue_lock);
+    }
+    cout << "All requests are uploaded" << endl;
+
+    int missingFlag = 0;
+
+    for(int chunkId = 0; chunkId < response_parsed["total_chunks"]; chunkId++){
+        cout << "Waiting for chunk: "<< chunkId << "....";
+        while(!status[file_hash+":"+to_string(chunkId)] && retry_count[file_hash+":"+to_string(chunkId)] != MAX_RETRIES);
+        if(status[file_hash+":"+to_string(chunkId)])
+            cout << "Received" << endl;
+        else{
+            missingFlag = 1;
+            cout << "Failed to download chunk "<< chunkId << endl;
         }
-
-        string path = "./download/" + file_hash + "/";
-        cout << path << endl;
-        // Save the chunk data (this would normally append to the actual file)
-        std::ofstream outFile(path + std::to_string(chunkID) + ".bin", std::ios::binary);
-        outFile.write(chunkData.data(), chunkData.size());
-        outFile.close();
-
-        std::cout << "Downloaded chunk " << chunkID << " from " << peerIP << ":" << peerPort << "\n";
-        close(sockfd);
+           
     }
 
-    createFileFromChunks(file_hash);
+    if(!missingFlag) {
+        std::string filename = getFileName(file_hash);
+        createFileFromChunks(file_hash, filename);
+        registerPeer(file_hash, peer_id, server_port);
+    }
+
+    // erase all the relevant entries from status map
+    for(int chunkId = 0; chunkId < response_parsed["total_chunks"]; chunkId++){
+        status.erase(file_hash+":"+to_string(chunkId));
+        retry_count.erase(file_hash+":"+to_string(chunkId));
+    }
+
+    
+
+    kill_threads = true;
+    pthread_cond_broadcast(&condition);
 }
+
 
 void PeerClient::handle_disconnection()
 {
@@ -492,6 +864,17 @@ void downloadFile(PeerClient &peer)
     peer.download_file(filehash);
 }
 
+void getfilename(PeerClient &peer)
+{
+    std::string filehash;
+    std::cout << "Enter filehash:";
+    std::cin >> filehash;
+
+    std::string filename = peer.getFileName(filehash);
+
+    cout << "file name: " << filename << endl;
+}
+
 void connectAndDownloadChunks(const std::string &filename)
 {
     // This is a stub for connecting with peers and downloading chunks.
@@ -523,7 +906,8 @@ int main()
         std::cout << "2. Get available files\n";
         std::cout << "3. Download file\n";
         std::cout << "4. Check connection status\n"; // New action
-        std::cout << "5. Exit\n";
+        std::cout << "5. Get file name\n"; // New action
+        std::cout << "6. Exit\n";
         int choice;
         std::cin >> choice;
 
@@ -582,6 +966,9 @@ int main()
             }
             break;
         case 5:
+            getfilename(peer);
+            break;
+        case 6:
             return 0;
         default:
             std::cout << "Invalid choice, try again.\n";

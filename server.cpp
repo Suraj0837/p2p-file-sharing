@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <filesystem>
 #include "include/json.hpp"
+#include <arpa/inet.h>
 
 using json = nlohmann::json;
 
@@ -19,7 +20,7 @@ struct PeerInfo
 {
     int peer_id;
     int port;
-    std::string ip = "127.0.0.1";
+    std::string ip;
     std::set<int> chunk_ids;
 };
 
@@ -69,6 +70,7 @@ void printFileTable()
         {
             std::cout << "    Peer ID: " << peer_id << "\n";
             std::cout << "    Peer port: " << peer_info.port << "\n";
+            std::cout << "    Peer ip: " << peer_info.ip << "\n";
             std::cout << "      Chunks owned by this peer: ";
             for (int chunk_id : peer_info.chunk_ids)
             {
@@ -90,11 +92,12 @@ public:
     CentralizedServer(int port) : port(port) {}
 
     bool start();
-    void handle_client(int client_socket);
-    void register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id, int port);
+    void handle_client(int client_socket, const std::string &client_ip, int client_port);
+    void register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id, int port, std::string ip);
     std::vector<int> get_chunk_locations(const std::string &file_hash, int chunk_id);
     std::vector<std::pair<std::string, std::string>> list_files();
     void send_chunk_data(int client_socket, const std::string &file_hash, int chunk_id);
+    void register_peer(const std::string &file_hash, int peer_id, int port, const std::string &ip);
 };
 
 bool CentralizedServer::start()
@@ -136,22 +139,35 @@ bool CentralizedServer::start()
 
     std::cout << "Server started on port " << port << std::endl;
 
+    struct sockaddr_in client_addr;
+    socklen_t client_len = 0;
+
     while (true)
     {
-        int client_socket = accept(server_fd, NULL, NULL);
+
+        int client_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_socket < 0)
         {
             perror("Accept failed");
             continue;
         }
-        std::cout << "connection accepted\n";
-        std::thread(&CentralizedServer::handle_client, this, client_socket).detach();
+
+        char client_ip[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip)) == NULL)
+        {
+            perror("inet_ntop failed");
+            close(client_socket);
+            continue;
+        }
+        int client_port = ntohs(client_addr.sin_port);
+        std::cout << "Connection accepted: IP = " << client_ip << ", Port = " << client_port << "\n";
+        std::thread(&CentralizedServer::handle_client, this, client_socket, std::string(client_ip), client_port).detach();
     }
 
     return true;
 }
 
-void CentralizedServer::handle_client(int client_socket)
+void CentralizedServer::handle_client(int client_socket, const std::string &client_ip, int client_port)
 {
     char buffer[1024] = {0};
     int bytes_read;
@@ -181,11 +197,11 @@ void CentralizedServer::handle_client(int client_socket)
             std::string file_hash = request_json["file_hash"];
             std::string file_name = request_json["file_name"];
             int peer_id = request_json["peer_id"];
-            int port = request_json["port"];
+            int peer_port = request_json["port"];
 
             for (int chunk_id : request_json["chunks"])
             {
-                register_chunk(file_hash, file_name, chunk_id, peer_id, port);
+                register_chunk(file_hash, file_name, chunk_id, peer_id, peer_port, client_ip);
                 std::cout << "Registered chunk " << chunk_id << " for file " << file_name << std::endl;
             }
 
@@ -230,7 +246,7 @@ void CentralizedServer::handle_client(int client_socket)
 
             json response;
             response["status"] = "success";
-            
+
             response["chunks"] = json::array();
 
             {
@@ -276,7 +292,42 @@ void CentralizedServer::handle_client(int client_socket)
         {
             std::cout << "checking for connection\n";
         }
-        else {
+        else if (command == "GET_FILE_NAME")
+        {
+            std::string file_hash = request_json["file_hash"];
+
+            json response;
+            {
+                std::lock_guard<std::mutex> lock(file_table_mutex);
+                if (file_table.find(file_hash) != file_table.end())
+                {
+                    response["status"] = "success";
+                    response["file_name"] = file_table[file_hash].file_name;
+                }
+                else
+                {
+                    response["status"] = "error";
+                    response["message"] = "File not found";
+                }
+            }
+
+            std::string response_str = response.dump();
+            send(client_socket, response_str.c_str(), response_str.length(), 0);
+        }
+        else if (command == "REGISTER_PEER")
+        {
+            std::string file_hash = request_json["file_hash"];
+            int peer_id = request_json["peer_id"];
+            int peer_port = request_json["port"];
+
+            // Register the peer without processing chunks
+            register_peer(file_hash, peer_id, peer_port, client_ip);
+
+            std::string response = "Peer registered successfully\n";
+            send(client_socket, response.c_str(), response.length(), 0);
+        }
+        else
+        {
             json response;
             response["status"] = "error";
             response["message"] = "Unknown command";
@@ -289,7 +340,7 @@ void CentralizedServer::handle_client(int client_socket)
     printFileTable();
 }
 
-void CentralizedServer::register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id, int port)
+void CentralizedServer::register_chunk(const std::string &file_hash, const std::string &file_name, int chunk_id, int peer_id, int port, std::string ip)
 {
     std::lock_guard<std::mutex> lock(file_table_mutex);
 
@@ -309,13 +360,44 @@ void CentralizedServer::register_chunk(const std::string &file_hash, const std::
     // Update peer info
     if (file_info.peer_list.find(peer_id) == file_info.peer_list.end())
     {
-        file_info.peer_list[peer_id] = PeerInfo{peer_id, port};
+        file_info.peer_list[peer_id] = PeerInfo{peer_id, port, ip};
     }
     file_info.peer_list[peer_id].chunk_ids.insert(chunk_id);
 
     file_info.total_chunks = std::max(file_info.total_chunks, chunk_id + 1);
 
     std::cout << "Registered chunk " << chunk_id << " for file " << file_hash << " from peer " << peer_id << std::endl;
+    printFileTable();
+}
+
+void CentralizedServer::register_peer(const std::string &file_hash, int peer_id, int port, const std::string &ip)
+{
+    std::lock_guard<std::mutex> lock(file_table_mutex);
+
+    // Check if the file exists in the file table
+    if (file_table.find(file_hash) == file_table.end())
+    {
+        std::cout << "File not found for hash: " << file_hash << std::endl;
+        return;
+    }
+
+    FileInfo &file_info = file_table[file_hash];
+
+    // Update peer info
+    if (file_info.peer_list.find(peer_id) == file_info.peer_list.end())
+    {
+        file_info.peer_list[peer_id] = PeerInfo{peer_id, port, ip};
+        std::cout << "Registered peer " << peer_id << " for file " << file_hash << std::endl;
+    }
+    else
+    {
+        // Peer already exists, update details if necessary
+        PeerInfo &peer_info = file_info.peer_list[peer_id];
+        peer_info.ip = ip;
+        peer_info.port = port;
+        std::cout << "Updated peer " << peer_id << " details for file " << file_hash << std::endl;
+    }
+
     printFileTable();
 }
 

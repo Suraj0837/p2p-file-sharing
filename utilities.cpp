@@ -23,13 +23,54 @@ using namespace std;
 #include <filesystem>
 #include <iostream>
 
-// Parses the peer list and returns a vector of <IP, Port> pairs
+// Parses the peer list and returns a vector of <IP, Port> pairs, ensuring uniqueness
+// std::vector<std::pair<std::string, int>> parsePeerList(const std::string& peerListResponse) {
+//     std::vector<std::pair<std::string, int>> peerAddresses;
+
+//     // Parse the JSON response
+//     json response = json::parse(peerListResponse);
+
+//     // Check if the response has "chunks" key and iterate over it
+//     if (response.contains("chunks")) {
+//         for (const auto& chunk : response["chunks"]) {
+//             // Iterate over peers for each chunk
+//             for (const auto& peer : chunk["peers"]) {
+//                 std::string ip = peer["ip"];
+//                 int port = peer["port"];
+
+//                 // Check if the peer (ip, port) is already in the list
+//                 bool alreadyExists = false;
+//                 for (const auto& existingPeer : peerAddresses) {
+//                     if (existingPeer.first == ip && existingPeer.second == port) {
+//                         alreadyExists = true;
+//                         break;
+//                     }
+//                 }
+
+//                 // If it doesn't exist, add it to the vector
+//                 if (!alreadyExists) {
+//                     peerAddresses.emplace_back(ip, port);
+//                 }
+//             }
+//         }
+//     }
+
+//     // Print the unique peer list
+//     std::cout << "Unique Peer list:" << std::endl;
+//     for (const auto& peer : peerAddresses) {
+//         std::cout << "IP: " << peer.first << ", Port: " << peer.second << std::endl;
+//     }
+
+//     return peerAddresses;
+// }
+
+// Parses the peer list and returns a vector of <IP, Port> pairs, ensuring unique ports
 std::vector<std::pair<std::string, int>> parsePeerList(const std::string& peerListResponse) {
     std::vector<std::pair<std::string, int>> peerAddresses;
-    
+
     // Parse the JSON response
     json response = json::parse(peerListResponse);
-    
+
     // Check if the response has "chunks" key and iterate over it
     if (response.contains("chunks")) {
         for (const auto& chunk : response["chunks"]) {
@@ -37,9 +78,28 @@ std::vector<std::pair<std::string, int>> parsePeerList(const std::string& peerLi
             for (const auto& peer : chunk["peers"]) {
                 std::string ip = peer["ip"];
                 int port = peer["port"];
-                peerAddresses.emplace_back(ip, port);
+
+                // Check if the port is already in the list
+                bool alreadyExists = false;
+                for (const auto& existingPeer : peerAddresses) {
+                    if (existingPeer.second == port) {  // Check only the port for uniqueness
+                        alreadyExists = true;
+                        break;
+                    }
+                }
+
+                // If the port doesn't exist, add the peer to the list
+                if (!alreadyExists) {
+                    peerAddresses.emplace_back(ip, port);
+                }
             }
         }
+    }
+
+    // Print the unique peer list based on ports
+    std::cout << "Unique Peer list (by port):" << std::endl;
+    for (const auto& peer : peerAddresses) {
+        std::cout << "IP: " << peer.first << ", Port: " << peer.second << std::endl;
     }
 
     return peerAddresses;
@@ -252,17 +312,17 @@ void createChunksFromFile(string filepath)
 // }
 
 
-void createFileFromChunks(string hash)
+void createFileFromChunks(string hash, string filename)
 {
     int chunk_idx = 0;
     char buffer[CHUNK_SIZE];
-    ofstream outputFile("./hello", ios::binary);
+    ofstream outputFile("./" + filename, ios::binary);
     if (!outputFile.is_open())
     {
         cout << "Unable to open output file for writing." << endl;
         return;
     }
-    string chunk_file_path = "./download/" + hash + "/" + to_string(chunk_idx) + ".bin";
+    string chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
 
     while (filesystem::exists(chunk_file_path))
     {
@@ -286,7 +346,7 @@ void createFileFromChunks(string hash)
 
         chunkFile.close();
         chunk_idx++;
-        chunk_file_path = "./download/" + hash + "/" + to_string(chunk_idx) + ".bin";
+        chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
     }
 
     outputFile.close();
