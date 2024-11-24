@@ -312,17 +312,17 @@ void createChunksFromFile(string filepath)
 // }
 
 
-void createFileFromChunks(string hash)
+void createFileFromChunks(string hash, string filename)
 {
     int chunk_idx = 0;
     char buffer[CHUNK_SIZE];
-    ofstream outputFile("./hello", ios::binary);
+    ofstream outputFile("./" + filename, ios::binary);
     if (!outputFile.is_open())
     {
         cout << "Unable to open output file for writing." << endl;
         return;
     }
-    string chunk_file_path = "./download/" + hash + "/" + to_string(chunk_idx) + ".bin";
+    string chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
 
     while (filesystem::exists(chunk_file_path))
     {
@@ -346,7 +346,7 @@ void createFileFromChunks(string hash)
 
         chunkFile.close();
         chunk_idx++;
-        chunk_file_path = "./download/" + hash + "/" + to_string(chunk_idx) + ".bin";
+        chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
     }
 
     outputFile.close();
