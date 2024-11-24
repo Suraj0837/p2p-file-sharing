@@ -27,7 +27,7 @@ struct ChunkInfo
 {
     int chunk_id;
     std::set<int> peers_having_chunk;
-    std::string data; // Data of the chunk (for simulating the server sending chunks)
+    std::string data; // Data of the chunk 
 };
 
 struct FileInfo
@@ -144,8 +144,26 @@ bool CentralizedServer::start()
             perror("Accept failed");
             continue;
         }
+<<<<<<< Updated upstream
         std::cout << "connection accepted\n";
         std::thread(&CentralizedServer::handle_client, this, client_socket).detach();
+=======
+
+        char client_ip[INET_ADDRSTRLEN];
+        if (getpeername(client_socket, (struct sockaddr *)&client_addr, &client_len) == 0)
+        {
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN); // Convert to readable format
+
+            int client_port = ntohs(client_addr.sin_port);
+            std::cout << "Connection accepted: IP = " << ip_str << ", Port = " << client_port << std::endl;
+            std::thread(&CentralizedServer::handle_client, this, client_socket, std::string(ip_str), client_port).detach();
+        }
+        else
+        {
+            std::cerr << "Failed to get peer name: " << strerror(errno) << std::endl;
+        }
+>>>>>>> Stashed changes
     }
 
     return true;
@@ -270,6 +288,7 @@ void CentralizedServer::handle_client(int client_socket)
             }
 
             std::string response_str = response.dump();
+            std::cout << response_str << std::endl;
             send(client_socket, response_str.c_str(), response_str.length(), 0);
         }
         else if (command == "CHECK_CONNECTION")

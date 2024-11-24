@@ -7,7 +7,7 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <filesystem>
-#include <format>
+// #include <format>
 #include <unistd.h>
 #include "utilities.h"
 #include <cstring>
@@ -63,16 +63,11 @@ int send_chunk(int connection_fd, int chunk_id, string file_hash){
     }
 
     inputFile.seekg(0, ios::beg);
-    // cout << "Connection FD : "<< connection_fd << endl;
-    // cout << "chunkId " << chunk_id << ", file_hash: " << file_hash << endl;
     
     while (inputFile.good())
     {   
-        // cout << "Within while" << endl;
         inputFile.read(buffer, CHUNK_SIZE);
         bytesRead = inputFile.gcount();
-        // getchar();
-        // cout << buffer << endl;
         if(write(connection_fd, buffer, CHUNK_SIZE) == -1){
             cout<<"Error while sending chunk "<<chunk_id<< endl;
             std::cerr << "Error writing to file: " << strerror(errno) << std::endl;
@@ -86,16 +81,13 @@ int send_chunk(int connection_fd, int chunk_id, string file_hash){
 
 int get_chunk_count(const std::string &file_hash)
 {
-    std::string chunk_dir = "./chunkked/" + file_hash; // Assuming chunks are stored in a folder named after the file hash
+    std::string chunk_dir = "./chunkked/" + file_hash;
     int chunk_count = 0;
 
-    // Check if directory exists
     if (std::filesystem::exists(chunk_dir) && std::filesystem::is_directory(chunk_dir))
     {
-        // Iterate through the directory and count files
         for (const auto &entry : std::filesystem::directory_iterator(chunk_dir))
         {
-            // Only count files (not directories)
             if (std::filesystem::is_regular_file(entry))
             {
                 ++chunk_count;
@@ -210,46 +202,6 @@ void createChunksFromFile(string filepath)
     inputFile.close();
 }
 
-// void createFileFromChunks(string hash)
-// {
-//     int chunk_idx = 0;
-//     char buffer[CHUNK_SIZE];
-//     ofstream outputFile("./hello", ios::binary);
-//     if (!outputFile.is_open())
-//     {
-//         cout << "Unable to open output file for writing." << endl;
-//         return;
-//     }
-//     string chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
-
-//     while (filesystem::exists(chunk_file_path))
-//     {
-//         ifstream chunkFile(chunk_file_path, ios::binary);
-//         if (!chunkFile.is_open())
-//         {
-//             cout << "Unable to open chunk file" << endl;
-//             return;
-//         }
-
-//         chunkFile.read(buffer, CHUNK_SIZE);
-
-//         outputFile.write(buffer, chunkFile.gcount());
-//         if (!outputFile.good())
-//         {
-//             cout << "Error writing to output file." << endl;
-//             chunkFile.close();
-//             outputFile.close();
-//             return;
-//         }
-
-//         chunkFile.close();
-//         chunk_idx++;
-//         chunk_file_path = "./chunkked/" + hash + "/" + to_string(chunk_idx) + ".bin";
-//     }
-
-//     outputFile.close();
-//     cout << "File reconstruction complete." << endl;
-// }
 
 
 void createFileFromChunks(string hash)
